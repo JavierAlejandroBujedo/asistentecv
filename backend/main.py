@@ -20,13 +20,9 @@ import time
 import asyncio
 from fastapi.responses import StreamingResponse
 from collections import OrderedDict
-# Habilitar loops anidados con blindaje para entornos de producción (como Render)
-try:
-    import nest_asyncio
-    nest_asyncio.apply()
-    print("[SYSTEM] nest_asyncio aplicado (modo compatibilidad actitvado).")
-except Exception as e:
-    print(f"[WARNING] No se pudo aplicar nest_asyncio: {e}. El sistema continuará con el loop estándar.")
+# En producción (Render) con Python 3.14+, el manejo de loops es más estricto.
+# Eliminamos nest_asyncio para evitar conflictos con el motor uvloop de Render.
+
 
 
 # LlamaIndex & AI imports
@@ -485,8 +481,9 @@ async def verify_role(user: dict = Depends(verify_token)):
         raise HTTPException(status_code=500, detail="Error interno en validación de roles")
 
 @app.get("/")
-def root():
+async def root():
     return {"status": "protected", "admin_configured": bool(ADMIN_UID)}
+
 
 if __name__ == "__main__":
     import uvicorn
