@@ -20,10 +20,13 @@ import time
 import asyncio
 from fastapi.responses import StreamingResponse
 from collections import OrderedDict
-import nest_asyncio
-
-# Habilitar loops anidados (necesario para LlamaIndex + Google GenAI en algunos entornos)
-nest_asyncio.apply()
+# Habilitar loops anidados con blindaje para entornos de producción (como Render)
+try:
+    import nest_asyncio
+    nest_asyncio.apply()
+    print("[SYSTEM] nest_asyncio aplicado (modo compatibilidad actitvado).")
+except Exception as e:
+    print(f"[WARNING] No se pudo aplicar nest_asyncio: {e}. El sistema continuará con el loop estándar.")
 
 
 # LlamaIndex & AI imports
