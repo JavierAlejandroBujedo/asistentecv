@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+python-multipart
+python-dotenv
+pydantic
+llama-index
+llama-index-llms-google-genai
+llama-index-embeddings-google-genai
+llama-index-vector-stores-pinecone
+llama-index-readers-file
+pinecone-client
