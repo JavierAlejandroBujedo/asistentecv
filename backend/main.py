@@ -238,7 +238,7 @@ def get_pc_index():
     return pc.Index(PINECONE_INDEX_NAME)
 
 @app.post("/upload-cv")
-def upload_cv(
+async def upload_cv(
     file: UploadFile = File(...), 
     admin_user: dict = Depends(verify_admin)
 ):
@@ -291,7 +291,7 @@ def upload_cv(
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/cv-list")
-def list_cvs(admin_user: dict = Depends(verify_admin)):
+async def list_cvs(admin_user: dict = Depends(verify_admin)):
     files = []
     for f in os.listdir(DOCUMENTS_DIR):
         path = os.path.join(DOCUMENTS_DIR, f)
@@ -304,7 +304,7 @@ def list_cvs(admin_user: dict = Depends(verify_admin)):
     return files
 
 @app.delete("/delete-cv/{filename}")
-def delete_cv(filename: str, admin_user: dict = Depends(verify_admin)):
+async def delete_cv(filename: str, admin_user: dict = Depends(verify_admin)):
     global global_query_engine
     try:
         file_path = os.path.join(DOCUMENTS_DIR, filename)
