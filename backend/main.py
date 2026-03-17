@@ -63,7 +63,8 @@ token_cache = {}
 TOKEN_CACHE_TTL = 300
 
 # --- SECURITY DEPENDENCIES ---
-async def verify_token(authorization: str = Header(None)):
+async def verify_token(authorization: Optional[str] = Header(None)):
+    print(f"[AUTH DEBUG] Validando header: {authorization[:20] if authorization else 'None'}")
     if not authorization or not authorization.startswith("Bearer "):
         return None
     
@@ -323,15 +324,17 @@ async def delete_cv(filename: str, admin_user: dict = Depends(verify_admin)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/chat")
-async def chat(request: ChatRequest, user: Optional[dict] = Depends(verify_token)):
+async def chat(request: ChatRequest, authorization: Optional[str] = Header(None)):
     global global_query_engine
     
-    # El chat ahora es público, no bloqueamos si user es None
+    # Validamos el token de forma manual para que sea 100% opcional
+    user = await verify_token(authorization)
+    
     uid = "Invitado"
     if user:
         uid = user.get('uid') or user.get('sub') or user.get('user_id') or "UID-Invitado"
-        
-    print(f"[DEBUG] Chat público - Usuario: {uid}")
+    
+    print(f"[DEBUG] Chat procesado como: {uid}")
     print(f"[DEBUG] Consultando índice de Pinecone para el UID: {uid}")
 
     # Forzar carga si es admin y no hay motor
