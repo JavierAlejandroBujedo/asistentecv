@@ -323,14 +323,15 @@ async def delete_cv(filename: str, admin_user: dict = Depends(verify_admin)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/chat")
-async def chat(request: ChatRequest, user: dict = Depends(verify_token)):
+async def chat(request: ChatRequest, user: Optional[dict] = Depends(verify_token)):
     global global_query_engine
     
-    if user is None:
-        print("[AUTH ERROR] Intento de chat sin token válido.")
-        raise HTTPException(status_code=401, detail="Token inválido o ausente. Por favor, inicia sesión de nuevo.")
+    # El chat ahora es público, no bloqueamos si user es None
+    uid = "Invitado"
+    if user:
+        uid = user.get('uid') or user.get('sub') or user.get('user_id') or "UID-Invitado"
         
-    uid = user.get('uid') or user.get('sub') or user.get('user_id') or "UID-Desconocido"
+    print(f"[DEBUG] Chat público - Usuario: {uid}")
     print(f"[DEBUG] Consultando índice de Pinecone para el UID: {uid}")
 
     # Forzar carga si es admin y no hay motor
