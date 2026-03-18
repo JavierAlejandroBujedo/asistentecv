@@ -44,7 +44,64 @@ load_dotenv()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME")
-ADMIN_UID = os.getenv("ADMIN_UID")
+ADMIN_UID = os.getenv("ADMIN_UID")  # Super Admin inamovible
+
+# --- FIREBASE ADMIN SDK (Firestore para roles IAM) ---
+firebase_admin = None
+firestore_db = None
+
+try:
+    import firebase_admin
+    from firebase_admin import credentials, firestore as admin_firestore
+
+    if not firebase_admin._apps:
+        # Prioridad 1: Variable de Entorno explícita con el JSON completo (Ideal para Render)
+        firebase_cert_env = os.getenv("FIREBASE_CERT_JSON")
+        cred_path = "./serviceAccountKey.json"
+        
+        try:
+            if firebase_cert_env:
+                print("[IAM] Inicializando Firestore desde Variable de Entorno (FIREBASE_CERT_JSON)...")
+                # Cargamos el JSON string de Render como diccionario Python
+                cert_dict = json.loads(firebase_cert_env, strict=False)
+                cred = credentials.Certificate(cert_dict)
+            elif os.path.exists(cred_path):
+                print(f"[IAM] Inicializando Firestore con llave local: {cred_path}")
+                cred = credentials.Certificate(cred_path)
+            else:
+                print("[IAM] Intentando inicializar Firestore con Application Default Credentials...")
+                cred = credentials.ApplicationDefault()
+
+            
+            # Inicializamos app
+            firebase_admin.initialize_app(cred, {'projectId': 'cvjavieralejandrobujedo'})
+        except Exception as auth_err:
+            print(f"[IAM WARNING] Falló la autenticación con Firebase: {auth_err}")
+            print("[IAM] Limpiando app por inicialización inconclusa...")
+            # Limpiar app por si quedó a medio iniciar
+            if firebase_admin._apps:
+                app = firebase_admin.get_app()
+                firebase_admin.delete_app(app)
+
+    # Solo si el SDK se autenticó correctamente intentamos sacar el cliente
+    if firebase_admin._apps:
+        try:
+            print("[IAM] Solicitando cliente Firestore...")
+            firestore_db = admin_firestore.client()
+            print("[IAM SUCCESS] Modulo IAM Firestore activado con éxito.")
+        except Exception as db_err:
+            print(f"[IAM ERROR] No se pudo instanciar Firestore Client. ¿Faltan permisos?: {db_err}")
+            firestore_db = None
+            
+except ImportError:
+    print("[IAM WARN] firebase-admin no está instalado en el backend.")
+except Exception as global_err:
+    print(f"[IAM CRITICAL] Crash interceptado en inicialización de BD Ppal: {global_err}")
+    firestore_db = None
+finally:
+    if not firestore_db:
+        print("[IAM FALLBACK] >>> SISTEMA CORRIENDO EN MODO SUPER ADMIN <<<")
+        print("[IAM FALLBACK] Las consultas y roles usarán exclusivamente ADMIN_UID.")
 
 # Directories
 DOCUMENTS_DIR = "documents"
@@ -56,11 +113,116 @@ print("="*50)
 
 # Firebase admin SDK bypassed (no ADC)
 
+# --- RATE LIMITING ---
+user_rate_limits = {}  # {uid: [timestamp1, timestamp2, ...]}
+RATE_LIMIT_QUOTA = 10
+RATE_LIMIT_WINDOW = 60 # segundos
+
+def check_rate_limit(uid: str) -> bool:
+    now = time.time()
+    if uid not in user_rate_limits:
+        user_rate_limits[uid] = [now]
+        return True
+    
+    # Limpiamos timestamps antiguos de la ventana
+    user_rate_limits[uid] = [t for t in user_rate_limits[uid] if now - t < RATE_LIMIT_WINDOW]
+    
+    if len(user_rate_limits[uid]) >= RATE_LIMIT_QUOTA:
+        return False
+        
+    user_rate_limits[uid].append(now)
+    return True
+
+# --- CACHE ---
 semantic_cache = OrderedDict()
 CACHE_TTL = 3600
 
 token_cache = {}
 TOKEN_CACHE_TTL = 300
+
+COMIC_WARNING = "¡Wow! Me has hecho tantas preguntas que hasta la IA se quedó sin aliento (y yo sin tokens). Dame un respiro de un minuto y seguimos analizando el talento de Javier."
+
+# --- MÉTRICAS DE TOKENS (PERSISTENTES) ---
+from datetime import datetime, date, timedelta
+
+DAILY_RPD_LIMIT = 1500  # Límite gratuito de Gemini RPD
+STATS_FILE = "stats.json"  # Archivo de persistencia
+
+# Estructura en memoria: { "YYYY-MM-DD": {"requests": 0, "total_tokens": 0} }
+usage_stats: dict = {}
+
+def _today_key() -> str:
+    return date.today().isoformat()
+
+def _load_stats_from_disk():
+    """Carga el historial desde stats.json al arrancar."""
+    global usage_stats
+    try:
+        if os.path.exists(STATS_FILE):
+            with open(STATS_FILE, "r", encoding="utf-8") as f:
+                usage_stats = json.load(f)
+            print(f"[STATS] Historial cargado desde {STATS_FILE}: {len(usage_stats)} días.")
+        else:
+            print(f"[STATS] No existe {STATS_FILE}, empezando desde cero.")
+    except Exception as e:
+        print(f"[STATS ERROR] No se pudo leer {STATS_FILE}: {e}")
+        usage_stats = {}
+
+def _save_stats_to_disk():
+    """Persiste el historial en stats.json."""
+    try:
+        with open(STATS_FILE, "w", encoding="utf-8") as f:
+            json.dump(usage_stats, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[STATS ERROR] No se pudo guardar {STATS_FILE}: {e}")
+
+def record_usage(prompt_tokens: int = 0, completion_tokens: int = 0, from_cache: bool = False):
+    """Registra uso de tokens para el día actual y persiste en disco."""
+    key = _today_key()
+    if key not in usage_stats:
+        usage_stats[key] = {"requests": 0, "total_tokens": 0, "cache_hits": 0}
+    usage_stats[key]["requests"] += 1
+    usage_stats[key]["total_tokens"] += (prompt_tokens + completion_tokens)
+    if from_cache:
+        usage_stats[key]["cache_hits"] = usage_stats[key].get("cache_hits", 0) + 1
+    source = "CACHE" if from_cache else "GEMINI"
+    print(f"[STATS] [{source}] +1 req | prompt={prompt_tokens} | completion={completion_tokens} | total_hoy={usage_stats[key]['requests']}")
+    _save_stats_to_disk()
+
+def get_stats_summary() -> dict:
+    today = _today_key()
+    today_data = usage_stats.get(today, {"requests": 0, "total_tokens": 0})
+    total_requests = sum(v["requests"] for v in usage_stats.values())
+    total_tokens = sum(v["total_tokens"] for v in usage_stats.values())
+    avg_tokens = round(total_tokens / total_requests, 1) if total_requests > 0 else 0
+
+    # Histórico de los últimos 7 días
+    history = []
+    for i in range(6, -1, -1):
+        d = (date.today() - timedelta(days=i)).isoformat()
+        day_data = usage_stats.get(d, {"requests": 0, "total_tokens": 0})
+        history.append({
+            "date": d,
+            "requests": day_data["requests"],
+            "tokens": day_data["total_tokens"]
+        })
+
+    return {
+        "requests_today": today_data["requests"],
+        "tokens_today": today_data["total_tokens"],
+        "total_tokens_used": total_tokens,
+        "total_requests": total_requests,
+        "average_tokens_per_query": avg_tokens,
+        "remaining_quota": max(0, DAILY_RPD_LIMIT - today_data["requests"]),
+        "quota_percentage": round((today_data["requests"] / DAILY_RPD_LIMIT) * 100, 2),
+        "daily_limit": DAILY_RPD_LIMIT,
+        "cache_size": len(semantic_cache),
+        "history_7d": history,
+    }
+
+# Cargamos el historial al iniciar el módulo
+_load_stats_from_disk()
+
 
 # --- SECURITY DEPENDENCIES ---
 async def verify_token(authorization: Optional[str] = Header(None)):
@@ -110,15 +272,52 @@ async def verify_token(authorization: Optional[str] = Header(None)):
         traceback.print_exc()
         return None
 
+# Caché de roles en memoria para no leer Firestore en cada request
+role_cache: dict = {}  # {uid: {"role": "admin", "ts": timestamp}}
+ROLE_CACHE_TTL = 300  # 5 minutos
+
+async def get_user_role(uid: str) -> str:
+    """
+    Resolución de rol con prioridades:
+    1. ADMIN_UID del .env  → siempre 'admin' (Super Admin inamovible)
+    2. Firestore coleccion 'users' doc.role  → rol dinámico
+    3. Fallback por defecto → 'user'
+    """
+    # Prioridad 1: Super Admin hardcodeado
+    if uid == ADMIN_UID:
+        return "admin"
+
+    # Prioridad 2: Caché en memoria
+    now = time.time()
+    if uid in role_cache and now - role_cache[uid]["ts"] < ROLE_CACHE_TTL:
+        return role_cache[uid]["role"]
+
+    # Prioridad 3: Firestore
+    if firestore_db:
+        try:
+            user_doc = firestore_db.collection("users").document(uid).get()
+            if user_doc.exists:
+                role = user_doc.to_dict().get("role", "user")
+                role_cache[uid] = {"role": role, "ts": now}
+                print(f"[IAM] Rol de Firestore para {uid}: {role}")
+                return role
+        except Exception as e:
+            print(f"[IAM ERROR] No se pudo consultar Firestore para {uid}: {e}")
+
+    return "user"
+
 async def verify_admin(user: dict = Depends(verify_token)):
     if user is None:
         raise HTTPException(status_code=401, detail="Token inválido o expirado")
-        
-    # 2. Fallback de UID
+
     uid = user.get('uid') or user.get('sub') or user.get('user_id')
-    if uid != ADMIN_UID:
-        print(f"[SECURITY ALERT] Intento de acceso administrativo por: {user.get('email', 'Desconocido')} (ID: {uid})")
+    role = await get_user_role(uid)
+
+    if role != "admin":
+        print(f"[SECURITY ALERT] Acceso admin denegado a: {user.get('email', 'Desconocido')} (UID: {uid})")
         raise HTTPException(status_code=403, detail="Acceso denegado: Se requieren permisos de administrador")
+
+    user['_resolved_role'] = role
     return user
 
 # --- EMBEDDING WRAPPER ---
@@ -181,21 +380,21 @@ Settings.chunk_overlap = 50
 
 
 SPANISH_QA_PROMPT = PromptTemplate(
-    "Información de contexto:\n"
-    "---------------------\n"
-    "{context_str}\n"
-    "---------------------\n"
-    "Dada la información de contexto y sin usar conocimiento previo, "
-    "responde a la siguiente pregunta SIEMPRE en castellano.\n"
+    "Contexto: {context_str}\n"
     "Pregunta: {query_str}\n"
-    "Respuesta (en castellano):"
+    "Responde solo con la información del contexto en castellano. Sé conciso y directo."
 )
 
 app = FastAPI(title="RAG CV Parser Protected API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "https://cvjavieralejandrobujedo.web.app",
+        "https://cvjavieralejandrobujedo.firebaseapp.com"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -233,6 +432,9 @@ def init_index():
 
 class ChatRequest(BaseModel):
     message: str
+
+class AutoLoginRequest(BaseModel):
+    enabled: bool
 
 def get_pc_index():
     pc = Pinecone(api_key=PINECONE_API_KEY)
@@ -334,6 +536,10 @@ async def chat(request: ChatRequest, authorization: Optional[str] = Header(None)
     if user:
         uid = user.get('uid') or user.get('sub') or user.get('user_id') or "UID-Invitado"
     
+    # 5. Control de Cuota (Rate Limiting)
+    if not check_rate_limit(uid):
+        return {"response": COMIC_WARNING}
+
     print(f"[DEBUG] Chat procesado como: {uid}")
     print(f"[DEBUG] Consultando índice de Pinecone para el UID: {uid}")
 
@@ -354,6 +560,8 @@ async def chat(request: ChatRequest, authorization: Optional[str] = Header(None)
         if request.message in semantic_cache and now - semantic_cache[request.message]['timestamp'] < CACHE_TTL:
             print("[CHAT] Devolviendo respuesta desde cache semántica...")
             cached_response = semantic_cache[request.message]['response']
+            # Registramos el hit de caché (0 tokens reales consumidos)
+            record_usage(prompt_tokens=0, completion_tokens=0, from_cache=True)
             async def cache_stream():
                 words = cached_response.split(" ")
                 for i, word in enumerate(words):
@@ -372,6 +580,16 @@ async def chat(request: ChatRequest, authorization: Optional[str] = Header(None)
             response = await global_query_engine.aquery(request.message)
             print(f"[CHAT] aquery finalizado en {time.time() - start_query:.2f}s")
             print(f"[DEBUG RESPONSE OBJ] Type: {type(response)}, Str value: '{str(response)[:50]}...'")
+            # ─── VERIFICACIÓN DE usage_metadata REAL DE GEMINI ───
+            if hasattr(response, 'metadata') and response.metadata:
+                print(f"[GEMINI METADATA] {response.metadata}")
+            if hasattr(response, 'response_metadata'):
+                print(f"[GEMINI RESPONSE METADATA] {response.response_metadata}")
+            # LlamaIndex expone el objeto LLM response en varios atributos
+            raw = getattr(response, 'raw', None)
+            if raw and hasattr(raw, 'usage_metadata'):
+                um = raw.usage_metadata
+                print(f"[GEMINI USAGE METADATA REAL] prompt={um.prompt_token_count} | completion={um.candidates_token_count} | total={um.total_token_count}")
             if hasattr(response, 'source_nodes'):
                 print(f"[DEBUG NODES] Encontrados {len(response.source_nodes)} nodos de contexto.")
                 for i, node in enumerate(response.source_nodes):
@@ -440,7 +658,7 @@ async def chat(request: ChatRequest, authorization: Optional[str] = Header(None)
                 logger.error(f"[STREAM ERROR] {type(stream_err).__name__}: {err_str}")
                 
                 if "429" in err_str or "Quota exceeded" in err_str:
-                    error_msg = "\n\n⚠️ **Límite de API:** He llegado al límite de consultas por hoy. Por favor, intenta de nuevo en unos minutos."
+                    error_msg = f"\n\n⚠️ {COMIC_WARNING}"
                 else:
                     error_msg = f"\n\n[Error técnico: {err_str[:50]}...]"
                 
@@ -448,6 +666,19 @@ async def chat(request: ChatRequest, authorization: Optional[str] = Header(None)
             finally:
                 if full_response:
                     semantic_cache[request.message] = {'response': full_response, 'timestamp': time.time()}
+                    # Intentamos usar usage_metadata REAL de Gemini primero
+                    raw = getattr(response, 'raw', None)
+                    if raw and hasattr(raw, 'usage_metadata'):
+                        um = raw.usage_metadata
+                        pt = getattr(um, 'prompt_token_count', 0) or 0
+                        ct = getattr(um, 'candidates_token_count', 0) or 0
+                        print(f"[STATS] Usando tokens REALES de Gemini: prompt={pt} completion={ct}")
+                    else:
+                        # Fallback: estimación por longitud de texto (~4 chars/token)
+                        pt = len(request.message) // 4
+                        ct = len(full_response) // 4
+                        print(f"[STATS] Usando tokens ESTIMADOS: prompt={pt} completion={ct}")
+                    record_usage(prompt_tokens=pt, completion_tokens=ct)
                 print(f"[LOG] Generación finalizada en {time.time() - start_gen:.2f}s")
                     
         return StreamingResponse(stream_generator(), media_type="text/event-stream")
@@ -455,7 +686,7 @@ async def chat(request: ChatRequest, authorization: Optional[str] = Header(None)
         err_str = str(e)
         logger.error(f"[CHAT CRITICAL ERROR] {err_str}")
         if "429" in err_str or "Quota exceeded" in err_str:
-            return {"response": "⚠️ Cuota de API agotada. He superado el límite de consultas gratuitas de Google por hoy. Por favor, intenta de nuevo más tarde."}
+            return {"response": f"⚠️ {COMIC_WARNING}"}
         return {"response": "Lo siento, tuve un problema al procesar esa pregunta. El servidor sigue vivo pero algo salió mal."}
 
 @app.get("/verify-role")
@@ -475,7 +706,7 @@ async def verify_role(user: dict = Depends(verify_token)):
         email = user.get('email', 'Desconocido')
         print(f"[AUTH] Validando token para el usuario: {email} (UID: {uid})")
         
-        role = "admin" if uid == ADMIN_UID else "user"
+        role = await get_user_role(uid)
         return {"role": role, "uid": uid}
     except HTTPException:
         raise
@@ -483,6 +714,83 @@ async def verify_role(user: dict = Depends(verify_token)):
         logger.error(f"[CRITICAL AUTH ERROR] {str(e)}")
         # Mantenemos el servidor vivo retornando el error de forma controlada
         raise HTTPException(status_code=500, detail="Error interno en validación de roles")
+
+
+@app.get("/admin/stats")
+async def admin_stats(admin_user: dict = Depends(verify_admin)):
+    """Endpoint exclusivo para admin: devuelve métricas de uso de tokens y cuota."""
+    stats = get_stats_summary()
+    print(f"[ADMIN STATS] Consultado por: {admin_user.get('email')}")
+    return stats
+
+class RoleUpdateRequest(BaseModel):
+    target_uid: str
+    new_role: str
+
+@app.patch("/admin/update-role")
+async def update_user_role(request: RoleUpdateRequest, admin_user: dict = Depends(verify_admin)):
+    """Permite a un administrador cambiar el rol de un usuario en Firestore."""
+    print(f"[BACKEND PATCH START] Recibida petición para cambiar {request.target_uid} a '{request.new_role}'")
+    
+    if request.new_role not in ["admin", "user"]:
+        raise HTTPException(status_code=400, detail="Rol inválido. Debe ser 'admin' o 'user'")
+    
+    # Prevenir que alguien le elimine el rol al Super Admin
+    if request.target_uid == ADMIN_UID:
+        print("[BACKEND DENEGADO] Intento de modificar al Super Admin")
+        raise HTTPException(status_code=403, detail="No se puede modificar el rol del Super Admin desde la interfaz.")
+        
+    if not firestore_db:
+        print("[BACKEND ERROR] El SDK de Firebase Admin no pudo inicializarse (Faltan credenciales).")
+        raise HTTPException(status_code=500, detail="Firestore no está configurado en el backend.")
+        
+    try:
+        # Añadimos un timeout de 5 segundos para que no muera en un retrying loop si no hay acceso a GCP
+        print(f"[BACKEND FIRESTORE] Intentando escribir en doc: users/{request.target_uid}")
+        firestore_db.collection("users").document(request.target_uid).set(
+            {"role": request.new_role}, 
+            merge=True, 
+            timeout=5.0
+        )
+        print("[BACKEND FIRESTORE] Escritura completada exitosamente.")
+        
+        # Invalidamos el caché si existía para que la recarga de rol sea inmediata
+        if request.target_uid in role_cache:
+            del role_cache[request.target_uid]
+            
+        return {"status": "success", "message": "Rol actualizado"}
+    except Exception as e:
+        logger.error(f"[IAM BACKEND ERROR FATAL] Error comunicando con Firestore: {type(e).__name__} - {e}")
+        # En vez de morir en silencio, devolvemos un 500 explícito con el detalle
+        raise HTTPException(status_code=500, detail=f"Error en BD: {e}")
+
+@app.patch("/admin/settings/auto-login")
+async def update_auto_login(request: AutoLoginRequest, admin_user: dict = Depends(verify_admin)):
+    """Permite al admin guardar en Firestore ignorando reglas frontend"""
+    if not firestore_db:
+        raise HTTPException(status_code=500, detail="Firestore no conectado")
+    try:
+        firestore_db.collection("settings").document("global_config").set(
+            {"auto_login_enabled": request.enabled}, 
+            merge=True
+        )
+        return {"status": "success"}
+    except Exception as e:
+        logger.error(f"[SETTINGS ERROR] No se pudo guardar config: {e}")
+        raise HTTPException(status_code=500, detail="Error de BD")
+
+@app.get("/settings/auto-login")
+async def get_auto_login():
+    """Endpoint público para leer la configuración de login sin depender de reglas de Firestore"""
+    if not firestore_db:
+        return {"auto_login_enabled": True}
+    try:
+        doc_snap = firestore_db.collection("settings").document("global_config").get()
+        if doc_snap.exists:
+            return {"auto_login_enabled": doc_snap.to_dict().get("auto_login_enabled", True)}
+    except Exception as e:
+        logger.error(f"[SETTINGS ERROR] No se pudo cargar settings/global: {e}")
+    return {"auto_login_enabled": True}
 
 @app.get("/")
 async def root():

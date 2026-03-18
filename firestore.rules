@@ -1,0 +1,50 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // FUNCIÓN DE PODER ABSOLUTO (Master + Role Check)
+    function isAdmin() {
+      let isMasterUID = request.auth != null && request.auth.uid == 'y8TIx2FrnKXUYeU64eqCqLAB16e2';
+      let hasAdminRole = request.auth != null && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+      return isMasterUID || hasAdminRole;
+    }
+
+    // 1. Usuarios: Blindaje del Super Admin
+    match /users/{userId} {
+      // Lectura: el propio usuario o cualquier admin
+      allow read: if request.auth != null && (request.auth.uid == userId || isAdmin());
+      
+      // Escritura propia (sync de perfil): solo campos no-sensibles (nombre, foto, etc)
+      allow write: if request.auth != null && request.auth.uid == userId
+                        && !('role' in request.resource.data);
+
+      // Escritura de admin (cambio de rol): solo admins, y NUNCA al Super Admin (tú)
+      allow write: if isAdmin() && userId != 'y8TIx2FrnKXUYeU64eqCqLAB16e2';
+    }
+
+    // 2. Historial de Chat (Auditoría)
+    match /chat_history/{docId} {
+      // Permitir creación a cualquier persona (Recruiters o Invitados)
+      allow create: if true; 
+      // Lectura y gestión: solo admins
+      allow read, update, delete: if isAdmin();
+    }
+    
+    // 3. Colección de Auditoría Interna
+    match /audit/{document=**} {
+      allow read, write: if isAdmin();
+    }
+
+    // 4. Configuración Global (Switch de Auto-Login)
+    match /settings/{document=**} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // 5. Estadísticas
+    match /stats/{docId} {
+      allow read: if request.auth != null;
+      allow write: if isAdmin();
+    }
+  }
+}

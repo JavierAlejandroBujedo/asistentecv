@@ -27,3 +27,8 @@ test_*.py
 list_models*.py
 verify_main.py
 models_out.txt
+backend/serviceAccountKey.json
+backend/stats.json
+frontend/dist/
+frontend/.env
+*.json.old

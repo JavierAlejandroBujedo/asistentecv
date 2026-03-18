@@ -7,6 +7,31 @@
             <v-icon color="#4285f4" class="mr-2" size="20">mdi-account-search-outline</v-icon>
             AUDITORÍA DE CONSULTAS
           </div>
+
+          <!-- Switch Auto-Login -->
+          <v-switch
+            v-model="autoLoginEnabled"
+            @change="toggleAutoLogin"
+            color="#4285f4"
+            hide-details
+            density="compact"
+            class="mr-4 my-0 py-0"
+          >
+            <template v-slot:label>
+              <div class="d-flex align-center">
+                <span class="text-caption font-weight-bold" :class="autoLoginEnabled ? 'text-blue-lighten-2' : 'text-grey'">
+                  Auto-Login Prompt: {{ autoLoginEnabled ? 'ON' : 'OFF' }}
+                </span>
+                <v-icon size="14" class="ml-1 text-grey" id="autologin-tooltip">mdi-information-outline</v-icon>
+                <v-tooltip activator="#autologin-tooltip" location="bottom" max-width="300" bgColor="#1e1f20">
+                  <div class="text-caption">
+                    <strong class="text-blue-lighten-2">ON:</strong> Salta aviso de login a los 10s.<br>
+                    <strong class="text-grey">OFF:</strong> Los visitantes exploran sin interrupciones.
+                  </div>
+                </v-tooltip>
+              </div>
+            </template>
+          </v-switch>
           
           <!-- Botón Borrar Masivo -->
           <v-btn
@@ -102,14 +127,27 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue';
-import { db, collection, query, orderBy, onSnapshot, doc, deleteDoc } from '../firebase';
+import { ref, onMounted, onUnmounted } from 'vue';
+import { db, auth, collection, query, orderBy, onSnapshot, doc, deleteDoc, setDoc } from '../firebase';
+import { APP_CONFIG } from '../config';
 
 const messages = ref([]);
 const selected = ref([]);
 const search = ref('');
 const loading = ref(true);
 const deleting = ref(false);
+const autoLoginEnabled = ref(true);
+
+const toggleAutoLogin = async () => {
+  try {
+    const settingsRef = doc(db, "settings", "global_config");
+    await setDoc(settingsRef, { auto_login_enabled: autoLoginEnabled.value }, { merge: true });
+  } catch (err) {
+    console.error("Error cambiando configuración de Auto-Login:", err);
+    autoLoginEnabled.value = !autoLoginEnabled.value;
+    alert("¡Ni con superpoderes! El servidor dice que no tienes permiso para tocar ese cable. Verifica que Firebase reconozca tu placa de Admin.");
+  }
+};
 
 const headers = [
   { title: 'FECHA', key: 'timestamp', align: 'start', sortable: true, width: '100px' },
@@ -154,15 +192,43 @@ const deleteSelected = async () => {
   }
 };
 
+let unsubscribeAudit = null;
+let unsubscribeSettings = null;
+
 onMounted(() => {
   const q = query(collection(db, "chat_history"), orderBy("timestamp", "desc"));
-  onSnapshot(q, (snapshot) => {
+  unsubscribeAudit = onSnapshot(q, (snapshot) => {
     messages.value = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
     loading.value = false;
   }, (err) => {
-    console.error("Error en Auditoría:", err);
+    // Silenciar si no hay sesión — es comportamiento esperado al cerrar sesión
+    if (err.code === 'permission-denied' && !auth.currentUser) return;
+    console.error('[AuditGrid] Error en Auditoría:', err);
     loading.value = false;
   });
+
+  // Listener para el switch global de Auto-Login — solo si hay sesión activa (admin)
+  if (auth.currentUser) {
+    unsubscribeSettings = onSnapshot(doc(db, "settings", "global_config"), (docSnap) => {
+      if (docSnap.exists()) {
+        autoLoginEnabled.value = docSnap.data().auto_login_enabled ?? true;
+      }
+    }, (err) => {
+      if (err.code === 'permission-denied') return; // silenciar para no-admins
+      console.error('[AuditGrid] Error leyendo settings:', err);
+    });
+  }
+});
+
+onUnmounted(() => {
+  if (unsubscribeAudit) {
+    unsubscribeAudit();
+    console.log('%c[AuditGrid] 🔇 Listener de auditoría cancelado.', 'color: #9ca3af;');
+  }
+  if (unsubscribeSettings) {
+    unsubscribeSettings();
+    console.log('%c[AuditGrid] 🔇 Listener de settings cancelado.', 'color: #9ca3af;');
+  }
 });
 </script>
 

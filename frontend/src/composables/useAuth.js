@@ -3,6 +3,8 @@ import { auth, db, googleProvider, signInWithPopup, signOut, onAuthStateChanged,
 import axios from 'axios';
 import { APP_CONFIG } from '../config';
 
+
+
 // Axios Interceptor for Firebase Token
 axios.interceptors.request.use(async (config) => {
     const currentUser = auth.currentUser;
@@ -18,6 +20,7 @@ axios.interceptors.request.use(async (config) => {
 const user = ref(null);
 const userRole = ref(null);
 const loading = ref(false);
+const isAuthReady = ref(false); // true cuando Firebase resolvió la sesión persistida
 
 /**
  * Composable to handle Authentication and User Synchronization
@@ -38,14 +41,15 @@ export function useAuth() {
             return;
         }
 
+        loading.value = true;
         try {
-            // Aseguramos de enviar el token explícitamente ya que auth.currentUser podría estar desincronizado en este primer ciclo
             const token = await firebaseUser.getIdToken();
             const response = await axios.get(`${APP_CONFIG.API_BASE_URL}/verify-role`, {
                 headers: { Authorization: `Bearer ${token}` }
             });
             userRole.value = response.data.role;
             lastUidVerified = firebaseUser.uid;
+            console.log(`%c[Auth] 🛡️ Rol verificado: ${userRole.value}`, 'color: #34a853; font-weight: bold;');
         } catch (e) {
             console.error("Error verifying role on server:", e);
             // 2. Interceptores de Frontend: Detectar caída del servidor
@@ -61,6 +65,8 @@ export function useAuth() {
             }
             userRole.value = "user"; // Fallback
             lastUidVerified = null;
+        } finally {
+            loading.value = false;
         }
     };
 
@@ -79,17 +85,22 @@ export function useAuth() {
             };
             if (userRole.value) userData.role = userRole.value;
             await setDoc(userRef, userData, { merge: true });
+            console.log('%c[Firestore] ✅ Datos de usuario sincronizados.', 'color: #34a853;');
         } catch (e) {
-            console.error("Error syncing user to Firestore:", e);
+            // permission-denied es esperado para usuarios normales sin regla de escritura propia
+            if (e.code === 'permission-denied') return;
+            console.error('[Firestore] Error sincronizando usuario:', e);
         }
     };
 
     const handleLogin = async () => {
         loading.value = true;
+        console.log(`%c[Auth] 🚀 Intentando conexión con Google...`, 'color: #4285f4; font-weight: bold;');
+        console.log(`%c[Auth] 🌐 Puerto detectado: ${window.location.port || '80'}`, 'color: #4285f4;');
         try {
             await signInWithPopup(auth, googleProvider);
         } catch (e) {
-            console.error("Login failed:", e);
+            console.error("[Auth] ❌ Login fallido:", e.code, e.message);
         } finally {
             loading.value = false;
         }
@@ -104,7 +115,7 @@ export function useAuth() {
         }
     };
 
-    // Global listener setup
+    // Global listener setup — se dispara UNA vez al cargar (con sesión cacheada) o null si no hay sesión
     onAuthStateChanged(auth, async (firebaseUser) => {
         user.value = firebaseUser;
         if (firebaseUser) {
@@ -114,12 +125,15 @@ export function useAuth() {
             lastUidVerified = null;
             userRole.value = null;
         }
+        // Marcamos que Firebase ya resolvió el estado inicial (con o sin usuario)
+        isAuthReady.value = true;
     });
 
     return {
         user,
         userRole,
         isAdmin,
+        isAuthReady,
         loading,
         handleLogin,
         handleLogout
