@@ -140,7 +140,7 @@ import { ref, watch, onMounted } from 'vue';
 import { useDisplay } from 'vuetify';
 import { useAuth } from './composables/useAuth';
 import { useChat } from './composables/useChat';
-import { db, doc, onSnapshot } from './firebase';
+import { auth, db, doc, onSnapshot } from './firebase';
 import { APP_CONFIG } from './config';
 
 // Components

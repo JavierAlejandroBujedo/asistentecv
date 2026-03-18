@@ -9,3 +9,7 @@ llama-index-embeddings-google-genai
 llama-index-vector-stores-pinecone
 llama-index-readers-file
 pinecone-client
+firebase-admin
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
